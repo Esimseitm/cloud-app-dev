@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: midterm-todo
+  labels:
+    app : midterm-todo
+    assingment: midterm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloud-app-todo
+  template:
+    metadata:
+      labels:
+        app: cloud-app-todo
+    spec:
+      containers:
+      - name: midterm-todo-app
+        image: europe-west1-docker.pkg.dev/cloud-app-dev-yessimseit2/cloud-app-dev/to-do:1.0
+        ports:
+        - containerPort: 8080

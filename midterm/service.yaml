@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: midterm-todo-service
+  labels:
+    app : midterm-todo
+    assingment: midterm
+spec:
+  selector:
+    app: cloud-app-todo
+  ports:
+    - port      : 80
+      targetPort: 8080
+  type: LoadBalancer

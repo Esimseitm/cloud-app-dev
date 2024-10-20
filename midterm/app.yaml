@@ -1,0 +1,11 @@
+runtime: python39
+env: flex
+service: default
+
+handlers:
+- url: /.*
+  script: auto
+
+endpoints_api_service:
+  name: cloud-app-dev-yessimseit2.appspot.com
+  rollout_strategy: managed
