@@ -1,0 +1,8 @@
+runtime: python39
+handlers:
+  - url: /.*
+    script: auto
+    
+endpoints_api_service:
+  name: example-project-12345.appspot.com
+  rollout_strategy: managed

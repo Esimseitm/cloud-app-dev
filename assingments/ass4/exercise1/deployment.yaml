@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: midterm-todo
+  labels:
+    app : midterm-todo
+    assingment: midterm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloud-app-todo
+  template:
+    metadata:
+      labels:
+        app: cloud-app-todo
+    spec:
+      containers:
+      - name: midterm-todo-app
+        image: gcr.io/cloud-app-dev-yessimseit/todo@sha256:177d87c5288fd3bed5152269802db5a1179b70890c1acc5304779c26e59f29e7
+        ports:
+        - containerPort: 8080
