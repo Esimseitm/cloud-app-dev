@@ -1,15 +1,31 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from datetime import datetime, timedelta
+from google.cloud import pubsub_v1
+import json
+import threading
+
+
+# Create a Pub/Sub client
+publisher = pubsub_v1.PublisherClient()
+topic_name = 'projects/cloud-app-dev-yessimseit/topics/event-notifications'
+# Create a subscriber client
+subscriber = pubsub_v1.SubscriberClient()
+subscription_name = 'projects/cloud-app-dev-yessimseit/subscriptions/event-notifications-sub'
+
+
 
 # Initialize Flask application
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:postgres@34.56.82.40:5432/eventdatabase'
+app.config['JWT_SECRET_KEY'] = 'pwd'  # Change this to a secure secret key
 
-# Initialize SQLAlchemy
+# Initialize extensions
 db = SQLAlchemy(app)
-
-# Define database models
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -95,14 +111,16 @@ class EventCategory(db.Model):
     event_id = db.Column(db.Integer, db.ForeignKey('event.id'), nullable=False)
     category_id = db.Column(db.Integer, db.ForeignKey('category.id'), nullable=False)
 
-# Create user route
+# User registration route
 @app.route('/register', methods=['POST'])
 def register_user():
     data = request.json
+    # Hash the password before storing it
+    hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
     new_user = User(
         username=data['username'],
         email=data['email'],
-        password_hash=data['password_hash'],
+        password_hash=hashed_password,
         first_name=data.get('first_name', ''),
         last_name=data.get('last_name', '')
     )
@@ -110,16 +128,175 @@ def register_user():
     db.session.commit()
     return jsonify({"message": "User registered successfully!"}), 201
 
+@app.route('/login', methods=['POST'])
+def login_user():
+    data = request.json
+    user = User.query.filter_by(username=data['username']).first()
+
+    if user and bcrypt.check_password_hash(user.password_hash, data['password']):
+        # Ensure the user ID is passed as a string for the 'sub' field in the token
+        access_token = create_access_token(identity=str(user.id), expires_delta=timedelta(hours=1))
+        return jsonify(access_token=access_token), 200
+    else:
+        return jsonify({"error": "Invalid credentials"}), 401
+
+
+# Delete user route (protected by JWT)
 @app.route('/delete_user/<int:user_id>', methods=['DELETE'])
+@jwt_required()
 def delete_user(user_id):
+    current_user_id = get_jwt_identity()  # This is now a string
+    if current_user_id != str(user_id):  # Ensure user_id is a string for comparison
+        return jsonify({"message": "Unauthorized to delete this user."}), 403
+    
     user = User.query.get_or_404(user_id)
     db.session.delete(user)
     db.session.commit()
     return jsonify({"message": "User deleted successfully!"}), 200
 
-# # Create tabless
+
+# Create event route (protected by JWT)
+@app.route('/events', methods=['POST'])
+@jwt_required()
+def create_event():
+    data = request.json
+    created_by = get_jwt_identity()  # Get the user ID from the JWT token
+    
+    new_event = Event(
+        title=data['title'],
+        description=data.get('description', ''),
+        date_time=datetime.strptime(data['date_time'], "%Y-%m-%d %H:%M:%S"),
+        location=data.get('location', ''),
+        created_by=created_by
+    )
+    db.session.add(new_event)
+    db.session.commit()
+    return jsonify({"message": "Event created successfully!"}), 201
+
+def publish_payment_message(payment_id):
+    message = {
+        'payment_id': payment_id,
+        'status': 'pending'
+    }
+    # Publish message to Pub/Sub
+    publisher.publish(topic_name, json.dumps(message).encode('utf-8'))
+
+
+def run_subscriber():
+    listen_for_payment_notifications()
+        
+
+# Subscribe to the Pub/Sub topic
+def listen_for_payment_notifications():
+    subscriber.subscribe(subscription_name, callback=callback)
+
+# Register for event route (protected by JWT)
+@app.route('/register_event', methods=['POST'])
+@jwt_required()
+def register_for_event():
+    data = request.json
+    user_id = get_jwt_identity()  # Get the user ID from the JWT token
+    
+    # Create registration
+    registration = Registration(
+        user_id=user_id,
+        event_id=data['event_id'],
+        ticket_type=data['ticket_type'],
+        number_of_tickets=data['number_of_tickets']
+    )
+    db.session.add(registration)
+    db.session.commit()
+
+    # Create payment record with status 'pending'
+    payment = Payment(
+        registration_id=registration.id,
+        amount=data['amount'],
+        status='pending'
+    )
+    db.session.add(payment)
+    db.session.commit()
+
+    # Publish payment message to Pub/Sub
+    publish_payment_message(payment.id)
+
+    return jsonify({"message": "Registration successful!"}), 201
+
+# Create category route (protected by JWT)
+@app.route('/categories', methods=['POST'])
+@jwt_required()
+def create_category():
+    data = request.json
+    new_category = Category(
+        name=data['name'],
+        description=data['description']
+    )
+    db.session.add(new_category)
+    db.session.commit()
+    return jsonify({"message": "Category created successfully!"}), 201
+
+# Get all events route (can be public or protected)
+@app.route('/events', methods=['GET'])
+def get_events():
+    events = Event.query.all()
+    events_list = [{'id': event.id, 'title': event.title, 'description': event.description} for event in events]
+    return jsonify(events_list)
+
+# Get all categories route (can be public or protected)
+@app.route('/categories', methods=['GET'])
+def get_categories():
+    categories = Category.query.all()
+    categories_list = [{'id': category.id, 'name': category.name, 'description': category.description} for category in categories]
+    return jsonify(categories_list)
+
+def callback(message):
+    # Parse the incoming message
+    message_data = json.loads(message.data.decode('utf-8'))
+    
+    payment_id = message_data['payment_id']
+    status = message_data['status']
+    
+    # Update payment status in the database
+    payment = Payment.query.get(payment_id)
+    if payment:
+        payment.status = status
+        db.session.commit()
+
+        # Create notification about successful payment
+        notification = Notification(
+            user_id=payment.registration.user_id,
+            event_id=payment.registration.event_id,
+            message=f"Payment for event {payment.registration.event_id} has been successfully completed.",
+        )
+        db.session.add(notification)
+        db.session.commit()
+
+        # Acknowledge the message
+        message.ack()
+
+
+def publish_payment_message(payment_id):
+    message = {
+        'payment_id': payment_id,
+        'status': 'pending'
+    }
+    # Publish message to Pub/Sub
+    publisher.publish(topic_name, json.dumps(message).encode('utf-8'))
+
+# Run the subscriber in a separate thread
+def run_subscriber():
+    listen_for_payment_notifications()
+
+# # Create tables
 # with app.app_context():
 #     db.create_all()
+import threading
+
+\
 
 if __name__ == '__main__':
+    # Start the subscriber thread
+    subscriber_thread = threading.Thread(target=run_subscriber)
+    subscriber_thread.start()
+    
+    # Run the Flask app
     app.run(debug=True)
